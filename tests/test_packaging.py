@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import re
@@ -61,6 +62,37 @@ def test_conf_schema_types_are_supported_by_astrbot():
         if spec.get("type") not in ASTRBOT_SCHEMA_TYPES
     }
     assert not bad, f"这些配置项用了 AstrBot 不认识的类型，会导致插件加载失败：{bad}"
+
+
+def test_lifecycle_hook_is_initialize_not_on_astrbot_loaded():
+    """建连必须放在 initialize()，不能用 filter.on_astrbot_loaded()。
+
+    on_astrbot_loaded 只在 AstrBot **进程启动**时触发一次（core_lifecycle.start()），
+    面板里重载插件、保存插件配置都只走 plugin_manager.reload()，不会再触发它。
+    用了那个钩子的话，重载之后插件照常收群消息、却从不连接后端，而且连启动
+    日志都不打——表现就是「插件明明在跑，群里什么都没发生」。
+
+    这里按装饰器而不是全文匹配：文档字符串里提到这个名字是应该的，
+    真正要禁的是把它当成钩子用。
+    """
+
+    tree = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    decorated = [
+        ast.unparse(decorator)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        for decorator in node.decorator_list
+    ]
+    assert not [d for d in decorated if "on_astrbot_loaded" in d], decorated
+
+    methods = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        for node in node.body
+        if isinstance(node, ast.AsyncFunctionDef)
+    }
+    assert {"initialize", "terminate"} <= methods
 
 
 def test_every_config_key_read_by_code_exists_in_the_schema():

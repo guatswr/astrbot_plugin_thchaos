@@ -57,9 +57,6 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
         def event_message_type(self, _value: Any):
             return lambda fn: fn
 
-        def on_astrbot_loaded(self):
-            return lambda fn: fn
-
     filter = _Filter()
 
     def register(*_args: Any, **_kwargs: Any):
@@ -79,7 +76,7 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return "".join(self._parts)
 
 
-CLIENT_VERSION = "0.2.2"
+CLIENT_VERSION = "0.2.3"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -110,14 +107,24 @@ class ThChaosPlugin(Star):
         self._cast_groups: dict[str, str] = {}
         self._reported_foreign_groups: set[str] = set()
 
-    @filter.on_astrbot_loaded()
-    async def on_astrbot_loaded(self) -> None:
+    async def initialize(self) -> None:
+        """插件每次被激活/重载时都会走到这里（与 terminate 配对）。
+
+        **不要改用 ``@filter.on_astrbot_loaded()``。** 那个钩子只在 AstrBot 进程
+        启动时触发一次（``core_lifecycle.start()`` 里那一处调用），面板里重载插件、
+        保存插件配置都只走 ``plugin_manager.reload()``，不会再触发它。在那种钩子里
+        建立连接的结果是：重载之后插件照常收消息、照常处理群消息，但从不连接后端，
+        播报一条也发不出去——而且是连启动日志都不打的那种安静。
+        """
+
         self._report_group_config()
         if not self._hmac_secret:
             astr_logger.warning("THChaos voter_hmac_secret 未配置，拒绝接收 QQ 投票")
         if not self._token:
             astr_logger.error("THChaos backend token 未配置，插件不会连接后端")
             return
+        if self._network_task and not self._network_task.done():
+            return  # 同一个实例被重复初始化时，不要开出第二条连接
         self._network_task = asyncio.create_task(self._run_network(), name="thchaos-backend-ws")
 
     def _report_group_config(self) -> None:

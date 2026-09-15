@@ -8,6 +8,7 @@ main.py 依赖 astrbot 包，离线时它自带 shim；装了 AstrBot 的环境�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import pathlib
 import sys
@@ -175,3 +176,85 @@ def test_routable_session_logs_no_failure(caplog):
     with caplog.at_level(logging.WARNING):
         run(plugin._announce_group("111", "【观众投票 #1】"))
     assert "发送消息失败" not in caplog.text
+
+
+# --- 生命周期：建连必须发生在 initialize() ---------------------------------
+
+
+def _initialize_with_recorder(config):
+    """跑一遍 initialize()，把网络协程换成记录器，返回 (plugin, started)。"""
+    plugin = ThChaosPlugin(FakeContext(), config)
+    started: list[bool] = []
+
+    async def fake_run():
+        started.append(True)
+        await asyncio.sleep(3600)
+
+    async def main():
+        plugin._run_network = fake_run  # type: ignore[method-assign]
+        await plugin.initialize()
+        assert plugin._network_task is not None
+        await asyncio.sleep(0)  # 让协程真正跑起来再取消
+        plugin._network_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await plugin._network_task
+
+    run(main())
+    return plugin, started
+
+
+def test_initialize_starts_the_backend_connection():
+    _, started = _initialize_with_recorder({"token": "t", "group_ids": ["111"]})
+    assert started == [True]
+
+
+def test_initialize_without_token_does_not_connect():
+    plugin = ThChaosPlugin(FakeContext(), {"token": "", "group_ids": ["111"]})
+    run(plugin.initialize())
+    assert plugin._network_task is None
+
+
+def test_initialize_twice_on_one_instance_opens_one_connection():
+    # 第二条连接会让每个群把同一份播报收到两遍。
+    plugin = ThChaosPlugin(FakeContext(), {"token": "t"})
+    started: list[bool] = []
+
+    async def fake_run():
+        started.append(True)
+        await asyncio.sleep(3600)
+
+    async def main():
+        plugin._run_network = fake_run  # type: ignore[method-assign]
+        await plugin.initialize()
+        first = plugin._network_task
+        await plugin.initialize()
+        assert plugin._network_task is first
+        await asyncio.sleep(0)
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+
+    run(main())
+    assert started == [True]
+
+
+def test_terminate_cancels_the_connection():
+    """重载插件时 AstrBot 会先 terminate 旧实例；不取消就会留下一条旧连接。
+
+    旧连接不断，后端就仍把它算作一个 bot，播报会重复发。
+    """
+    plugin = ThChaosPlugin(FakeContext(), {"token": "t"})
+
+    async def fake_run():
+        await asyncio.sleep(3600)
+
+    async def main():
+        plugin._run_network = fake_run  # type: ignore[method-assign]
+        await plugin.initialize()
+        task = plugin._network_task
+        assert task is not None
+        await asyncio.sleep(0)  # 让 _run_network 真正开始跑
+        await plugin.terminate()
+        assert task.cancelled()
+
+    run(main())
