@@ -184,37 +184,222 @@ def suspicious_group_ids(group_ids: Iterable[str]) -> list[str]:
 
 
 # --- 播报文案 ---------------------------------------------------------------
+#
+# 群友看到的每一行都从这里出。两条规矩：
+#
+# 1. **机器值不端给观众。** 协议里的 phase / reason / result_code / event_key
+#    都是给程序看的键（``waiting``、``rejected.conflict``、``input.disable_shot``），
+#    直接贴进群里和乱码没区别。这里全部查表翻成中文，查不到也不退回原文。
+# 2. **不留多余空格。** 中文与数字之间不加空格、不在括号里把机器值再抄一遍、
+#    倒计时按秒向上取整——``（剩余 10.0 秒）`` 这种写法一眼就是生成的。
+
+# 游戏端 ``eventtext::DisplayName`` 的镜像，覆盖 th06nc 现役的 21 个异变。
+# effect.resolved 只带 event_key、不带显示名（只有 vote.opened 的候选项带 name），
+# 所以插件自己得留一份；运行时从候选项收到的 name 优先于这张表，见
+# effect_display_name。上游加新异变时旧插件会退回原始键，届时更新这里即可。
+EFFECT_NAMES = {
+    "resource.bomb.add": "增加一个B",
+    "resource.bomb.remove": "减少一个B",
+    "resource.life.add": "增加一个残机",
+    "resource.life.remove": "减少一个残机",
+    "resource.power.set": "设置火力",
+    "resource.power.lock": "限时锁定火力",
+    "resource.score.add": "增减分数",
+    "resource.graze.add": "增减擦弹",
+    "protection.invulnerable": "限时无敌",
+    "input.invert_x": "左右反转",
+    "input.invert_y": "上下反转",
+    "input.disable_shot": "禁止射击",
+    "input.force_shot": "强制射击",
+    "input.disable_bomb": "禁止使用B",
+    "input.force_focus": "强制低速",
+    "input.disable_focus": "禁止低速",
+    "input.rotate_90": "方向顺时针旋转90度",
+    "input.swap_axes": "交换水平垂直轴",
+    "input.lock_direction": "锁定移动方向",
+    "input.random_drift": "随机方向漂移",
+    "input.no_diagonal": "禁止斜向移动",
+}
+
+EFFECT_RESULT_TEXT = {
+    "ok.clamped": "数值被修正",
+    "ok.unchanged": "数值不变",
+    "rejected.argument": "参数不对",
+    "rejected.command_id": "指令编号无效",
+    "rejected.conflict": "和场上已有的异变冲突",
+    "rejected.cooldown": "还在冷却",
+    "rejected.duplicate": "重复指令",
+    "rejected.duration": "持续时间不对",
+    "rejected.image_unverified": "没认出游戏版本",
+    "rejected.no_room": "房间不存在",
+    "rejected.not_in_game": "不在游戏中",
+    "rejected.param": "参数越界",
+    "rejected.paused": "游戏暂停中",
+    "rejected.queue_full": "指令排队满了",
+    "rejected.replay": "正在看重放",
+    "rejected.state": "当前状态不收",
+    "rejected.suppressed": "被别的异变压住了",
+    "rejected.unavailable": "这个异变现在拿不到",
+    "rejected.unknown_event": "游戏端不认识这个异变",
+    "rejected.version": "版本对不上",
+    "failed.access": "执行失败",
+}
+
+# 游戏端 GamePhase / StateReason。协议把它们定义成封闭枚举，所以查不到只可能是
+# 上游改了协议而插件还没跟上，这时说"状态未知"比把英文原样端出去强。
+PHASE_TEXT = {
+    "offline": "游戏离线",
+    "title": "标题画面中~",
+    "waiting": "少女祈祷中~",
+    "voting": "投票中",
+    "replay": "重放中",
+}
+STATE_REASON_TEXT = {
+    "stage_entered": "让我们期待机师的精彩表现",
+    "stage_left": "感谢机师的精彩表现~",
+    "paused": "少女祈祷中~",
+    "resumed": "游戏继续",
+    "offline": "ATRI和游戏离线了~",
+    "sync": "重新同步",
+}
+
+# vote.closed 的 reason。只有需要解释的两种才留在这里：
+#
+# * ``winner``——"得票最高的中选"和下一行的"2号中选"是同一句话，说两遍就成了
+#   机器在念模板，索性不写。
+# * ``cancelled``——单独处理：作废的一轮没有中选者，照着 winner_choices 写
+#   "中选"是错的。
+VOTE_CLOSE_TEXT = {
+    "tie_all": "三票打平，三个一起上",
+    "no_votes_random": "没人投票哦，那就随机抽一个吧~",
+}
+
+# vote.ack 的 reason。accepted 只在 counted 为真时出现，不算拒绝理由。
+VOTE_ACK_TEXT = {
+    "disabled": "投票功能没有开启哦~",
+    "not_voting": "现在还没有投票",
+    "wrong_round": "投的不是这一轮",
+    "bad_choice": "只能投1、2、3",
+    "bad_voter": "身份没法识别",
+    "duplicate": "baka，这一轮你已经投过了",
+    "full": "票满了",
+}
+
+
+def _ceil_seconds(milliseconds: Any) -> int:
+    """毫秒向上取整成秒。
+
+    倒计时宁可多报一秒：还剩半秒就显示"剩0秒"，读起来像已经结束了。
+    """
+
+    try:
+        value = int(milliseconds)
+    except (TypeError, ValueError):
+        return 0
+    return -(-value // 1000)
+
+
+def option_name_entries(payload: dict[str, Any]) -> dict[str, str]:
+    """从任何带候选列表的协议消息里收集 ``event_key → 显示名``。
+
+    游戏端在 vote.opened / vote.snapshot / vote.closed 里都带了每个异变的中文
+    名，只有 effect.resolved 不带。把见过的名字攒起来，执行播报就不必依赖下面
+    那张手抄的 EFFECT_NAMES——上游加异变时它会自己跟上。
+    """
+
+    found: dict[str, str] = {}
+    sources = [payload]
+    for key in ("active_vote", "latest_snapshot"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+    for source in sources:
+        for key in ("options", "final_options"):
+            items = source.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                event_key = item.get("event_key")
+                name = item.get("name")
+                if isinstance(event_key, str) and event_key and isinstance(name, str) and name:
+                    found[event_key] = name
+    return found
+
+
+def effect_display_name(payload: dict[str, Any], catalogues: Iterable[dict[str, str]] = ()) -> str:
+    """给一条 effect.resolved 挑显示名，可靠到不可靠依次往下退。
+
+    1. 消息里直接带的 ``name``——后端目前不发，发了就一定对。
+    2. 之前从候选项攒下来的名字——跟随游戏端，不需要改插件。
+    3. 手抄的 ``EFFECT_NAMES``——覆盖现役的全部 21 个异变。
+    4. 原始 event_key——上游加了插件不认识的异变时，宁可难看也别编一个。
+    """
+
+    name = payload.get("name")
+    if isinstance(name, str) and name:
+        return name
+    event_key = str(payload.get("event_key", ""))
+    for catalogue in catalogues:
+        found = catalogue.get(event_key)
+        if found:
+            return found
+    return EFFECT_NAMES.get(event_key, event_key or "未知异变")
 
 
 def format_vote_opened(payload: dict[str, Any]) -> str:
-    lines = [f"【观众投票 #{payload['round_id']}】"]
+    lines = [f"【异变投票#{payload['round_id']}】"]
     for item in payload["options"]:
-        lines.append(f"{item['choice']}. {item['name']}")
-    seconds = payload.get("remaining_ms", 0) / 1000
-    lines.append(f"回复 1/2/3 投票（剩余 {seconds:.1f} 秒）")
+        lines.append(f"{item['choice']}、{item['name']}")
+    lines.append(f"回复1/2/3，给机师挑个异变吧~，剩{_ceil_seconds(payload.get('remaining_ms', 0))}秒")
     return "\n".join(lines)
 
 
 def format_snapshot(payload: dict[str, Any]) -> str:
-    parts = [f"{item['choice']}:{item['votes']}票" for item in payload["options"]]
-    suffix = "（游戏暂停，计时冻结）" if payload.get("paused") else ""
-    return f"【票况 #{payload['round_id']}】" + "  ".join(parts) + suffix
+    parts = " ".join(f"{item['choice']}号{item['votes']}票" for item in payload["options"])
+    suffix = "（暂停，计时冻结）" if payload.get("paused") else ""
+    return f"【票况#{payload['round_id']}】{parts}{suffix}"
 
 
 def format_vote_closed(payload: dict[str, Any]) -> str:
-    labels = {
-        "winner": "最高票",
-        "tie_all": "平票，三个全开",
-        "no_votes_random": "无人投票，随机抽取",
-        "cancelled": "已取消",
-    }
-    winners = ", ".join(str(item) for item in payload["winner_choices"])
-    return (
-        f"【投票结果 #{payload['round_id']}】{labels.get(payload['reason'], payload['reason'])}\n"
-        f"选项：{winners}；最高票 {payload['winning_votes']}，总票 {payload['total_votes']}"
-    )
+    head = f"【异变落定#{payload['round_id']}】"
+    if payload["reason"] == "cancelled":
+        return head + "这一轮作废了哦~，不产生异变"
+    winners = "、".join(f"{item}号" for item in payload["winner_choices"])
+    # 三个一起中选时说"各得N票"才是对的，"得N票"会被读成总共 N 票。
+    votes = f"得{payload['winning_votes']}票" if len(payload["winner_choices"]) == 1 else f"各得{payload['winning_votes']}票"
+    outcome = f"{winners}中选，{votes}，总票{payload['total_votes']}"
+    # 平票和随机抽签不解释就看不懂；得票最高是常态，解释反而是废话。
+    reason = VOTE_CLOSE_TEXT.get(payload["reason"])
+    return f"{head}{reason}\n{outcome}" if reason else f"{head}{outcome}"
 
 
-def format_effect(payload: dict[str, Any]) -> str:
-    status = "已生效" if payload["status"] == "applied" else "被游戏拒绝"
-    return f"【Chaos 执行】{payload['name'] if 'name' in payload else payload['event_key']}：{status}（{payload['result_code']}）"
+def format_effect(payload: dict[str, Any], catalogues: Iterable[dict[str, str]] = ()) -> str:
+    name = effect_display_name(payload, catalogues)
+    detail = EFFECT_RESULT_TEXT.get(str(payload.get("result_code", "")))
+    head = "异变生效" if payload["status"] == "applied" else "异变没生效"
+    return f"【{head}】{name}" + (f"，{detail}" if detail else "")
+
+
+def format_game_state(payload: dict[str, Any]) -> str:
+    phase = PHASE_TEXT.get(str(payload.get("phase", "")), "状态未知")
+    reason = STATE_REASON_TEXT.get(str(payload.get("reason", "")))
+    # reason 是变化的原因、phase 是变完之后的样子，中文里按这个顺序说才通顺。
+    return f"【游戏状态】{reason}，当前{phase}" if reason else f"【游戏状态】当前{phase}"
+
+
+def format_game_offline() -> str:
+    return "本次STG接力已结束，感谢大家的参与~"
+
+
+def format_vote_ack(payload: dict[str, Any]) -> str:
+    choice = payload.get("choice", "?")
+    if payload.get("counted"):
+        return f"【已计票】{choice}号，记下了"
+    reason = VOTE_ACK_TEXT.get(str(payload.get("reason", "")), "没算上")
+    return f"【没算上】{choice}号，{reason}"
+
+
+def format_cast_error(payload: dict[str, Any]) -> str:
+    return f"【投票没送出】{payload.get('message', '后端没说原因')}"

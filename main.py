@@ -23,12 +23,17 @@ import aiohttp
 from .logic import (
     backend_url_problem,
     candidate_platform_ids,
+    format_cast_error,
     format_effect,
+    format_game_offline,
+    format_game_state,
     format_snapshot,
+    format_vote_ack,
     format_vote_closed,
     format_vote_opened,
     group_id_from_message,
     normalize_group_ids,
+    option_name_entries,
     parse_vote_choice,
     pseudonymous_voter_id,
     resolve_umo,
@@ -79,7 +84,7 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return "".join(self._parts)
 
 
-CLIENT_VERSION = "0.2.7"
+CLIENT_VERSION = "0.2.8"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -107,6 +112,7 @@ class ThChaosPlugin(Star):
         self._active_round: int | None = None
         self._active_options: list[dict[str, Any]] = []
         self._latest_snapshot: dict[str, Any] | None = None
+        self._effect_names: dict[str, str] = {}
         self._cast_groups: dict[str, str] = {}
         self._reported_foreign_groups: set[str] = set()
 
@@ -262,6 +268,10 @@ class ThChaosPlugin(Star):
     async def _handle_backend_message(self, envelope: dict[str, Any]) -> None:
         message_type = envelope.get("type")
         payload = envelope.get("payload") or {}
+        # effect.resolved 只带 event_key 不带显示名，而候选项里两个都有。
+        # 每条消息路过时顺手把见过的名字攒下来，"异变生效"那条播报就不必
+        # 依赖插件里手抄的那份表。
+        self._effect_names.update(option_name_entries(payload))
         if message_type == "authenticated":
             self._game_instance_id = payload.get("game_instance_id") or self._game_instance_id
             # 连上后端本身是要专门说一声的：插件以前只在失败时打日志，
@@ -291,25 +301,21 @@ class ThChaosPlugin(Star):
             self._schedule_snapshot_announcement()
         elif message_type == "vote.ack":
             group_id = self._cast_groups.pop(str(payload.get("cast_id", "")), "")
-            if self._announce_ack:
-                if group_id:
-                    status = "已计票" if payload.get("counted") else f"未计票（{payload.get('reason', 'rejected')}）"
-                    await self._announce_group(group_id, f"【投票】{status}：选项 {payload.get('choice', '?')}。")
+            if self._announce_ack and group_id:
+                await self._announce_group(group_id, format_vote_ack(payload))
         elif message_type == "vote.closed":
             self._active_round = None
             self._active_options = []
             self._latest_snapshot = None
             await self._announce_all(format_vote_closed(payload))
         elif message_type == "effect.resolved":
-            await self._announce_all(format_effect(payload))
+            await self._announce_all(format_effect(payload, (self._effect_names,)))
         elif message_type == "game.state_changed":
-            reason = payload.get("reason", "state_changed")
-            phase = payload.get("phase", "unknown")
-            await self._announce_all(f"【游戏状态】{phase}（{reason}）")
+            await self._announce_all(format_game_state(payload))
         elif message_type == "game.offline":
             self._active_round = None
             self._active_options = []
-            await self._announce_all("【THChaos】游戏端已断开，暂时无法投票。")
+            await self._announce_all(format_game_offline())
         elif message_type == "heartbeat.ping":
             await self._send("heartbeat.pong", {"nonce": payload.get("nonce", "heartbeat")})
         elif message_type == "error":
@@ -317,7 +323,7 @@ class ThChaosPlugin(Star):
             if payload.get("cast_id"):
                 group_id = self._cast_groups.pop(str(payload["cast_id"]), "")
                 if self._announce_ack and group_id:
-                    await self._announce_group(group_id, f"【投票】提交失败：{payload.get('message', 'backend error')}。")
+                    await self._announce_group(group_id, format_cast_error(payload))
 
     def _schedule_snapshot_announcement(self) -> None:
         if self._snapshot_task and not self._snapshot_task.done():

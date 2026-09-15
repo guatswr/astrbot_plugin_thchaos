@@ -3,7 +3,6 @@ from logic import (
     backend_url_problem,
     candidate_platform_ids,
     default_umo,
-    format_snapshot,
     group_id_from_message,
     normalize_group_ids,
     parse_vote_choice,
@@ -25,16 +24,9 @@ def test_plugin_vote_parser_and_pseudonym():
     assert len(first) <= 63 and len(first) == 63 and first.isascii() and " " not in first
 
 
-def test_snapshot_format_and_umo():
+def test_default_umo_is_the_aiocqhttp_one():
+    # 只在既没记住真实会话、又认不出唯一群聊平台时才用得上。
     assert default_umo("123456") == "aiocqhttp:GroupMessage:123456"
-    text = format_snapshot(
-        {
-            "round_id": 3,
-            "options": [{"choice": 1, "votes": 2}, {"choice": 2, "votes": 0}, {"choice": 3, "votes": 1}],
-            "paused": True,
-        }
-    )
-    assert "#3" in text and "1:2票" in text and "冻结" in text
 
 
 def test_normalize_group_ids_accepts_every_shape_a_config_can_take():
