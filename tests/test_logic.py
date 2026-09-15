@@ -7,6 +7,8 @@ from logic import (
     parse_vote_choice,
     pseudonymous_voter_id,
     suspicious_group_ids,
+    umo_platform,
+    unroutable_groups,
 )
 
 
@@ -88,3 +90,29 @@ def test_port_written_after_a_slash_is_caught_with_the_fix():
 def test_wrong_scheme_and_missing_host_are_caught():
     assert backend_url_problem("http://1.2.3.4:9961/ws/bot") is not None
     assert backend_url_problem("192.0.2.10:9961/ws/bot") is not None
+
+
+def test_umo_platform_is_the_part_before_the_first_colon():
+    assert umo_platform("aiocqhttp:GroupMessage:123456") == "aiocqhttp"
+    assert umo_platform("atri:GroupMessage:123456") == "atri"
+
+
+def test_unroutable_groups_names_every_session_that_would_be_dropped():
+    # 平台 ID 是用户在面板里给适配器起的名字，只有没改过时才叫 aiocqhttp。
+    groups = {"123456789", "111"}
+    explicit = {"123456789": "atri:GroupMessage:123456789"}
+    # 配了 group_umos 的那个能路由，剩下那个退回默认 UMO 就发不出去
+    assert unroutable_groups(groups, explicit, ["atri", "webchat"]) == [
+        ("111", "aiocqhttp:GroupMessage:111")
+    ]
+    # 反过来：平台确实叫 aiocqhttp 时，手工配的 atri 前缀反而成了问题
+    assert unroutable_groups(groups, explicit, ["aiocqhttp"]) == [
+        ("123456789", "atri:GroupMessage:123456789")
+    ]
+    assert unroutable_groups(groups, explicit, ["aiocqhttp", "atri"]) == []
+    assert unroutable_groups(set(), {}, ["atri"]) == []
+
+
+def test_unroutable_check_stays_quiet_without_a_platform_list():
+    # 拿不到平台列表（离线 shim、精简 Context）时不下结论，免得误报。
+    assert unroutable_groups({"111"}, {}, []) == []

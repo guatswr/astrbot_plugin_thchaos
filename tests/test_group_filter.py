@@ -181,9 +181,9 @@ def test_routable_session_logs_no_failure(caplog):
 # --- 生命周期：建连必须发生在 initialize() ---------------------------------
 
 
-def _initialize_with_recorder(config):
+def _initialize_with_recorder(config, context=None):
     """跑一遍 initialize()，把网络协程换成记录器，返回 (plugin, started)。"""
-    plugin = ThChaosPlugin(FakeContext(), config)
+    plugin = ThChaosPlugin(context or FakeContext(), config)
     started: list[bool] = []
 
     async def fake_run():
@@ -323,3 +323,33 @@ def test_platform_hint_survives_a_context_without_platform_manager(caplog):
     with caplog.at_level(logging.WARNING):
         run(plugin._announce_group("111", "【观众投票 #1】"))
     assert "没有已加载的平台适配器" in caplog.text
+
+
+def test_initialize_names_groups_whose_session_would_be_dropped(caplog):
+    # 这种配置错误在运行时要等到真有播报才露头；没有投票时它完全静音，
+    # 所以启动时就得先说出来。
+    context = PlatformAwareContext(["atri", "webchat"])
+    with caplog.at_level(logging.WARNING):
+        _initialize_with_recorder({"token": "t", "group_ids": ["123456789"]}, context)
+    assert "123456789" in caplog.text
+    assert "atri" in caplog.text
+    assert "group_umos" in caplog.text
+
+
+def test_initialize_is_quiet_when_the_default_platform_is_loaded(caplog):
+    context = PlatformAwareContext(["aiocqhttp", "webchat"])
+    with caplog.at_level(logging.WARNING):
+        _initialize_with_recorder({"token": "t", "group_ids": ["123456789"]}, context)
+    assert "发不出去" not in caplog.text
+
+
+def test_initialize_is_quiet_when_group_umos_matches_a_loaded_platform(caplog):
+    context = PlatformAwareContext(["atri", "webchat"])
+    config = {
+        "token": "t",
+        "group_ids": ["123456789"],
+        "group_umos": {"123456789": "atri:GroupMessage:123456789"},
+    }
+    with caplog.at_level(logging.WARNING):
+        _initialize_with_recorder(config, context)
+    assert "发不出去" not in caplog.text

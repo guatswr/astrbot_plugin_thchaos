@@ -25,8 +25,41 @@ def pseudonymous_voter_id(secret: str, sender_id: str) -> str:
     return f"q{digest[:62]}"
 
 
+# AstrBot 的会话标识是 <平台ID>:<消息类型>:<会话ID>。平台 ID 是用户在面板里给
+# 适配器起的名字，只有没改过时才叫 aiocqhttp——猜错不会报错，只会静默丢消息。
+DEFAULT_UMO_PLATFORM = "aiocqhttp"
+
+
 def default_umo(group_id: str) -> str:
-    return f"aiocqhttp:GroupMessage:{group_id}"
+    return f"{DEFAULT_UMO_PLATFORM}:GroupMessage:{group_id}"
+
+
+def umo_platform(umo: str) -> str:
+    """取会话标识里的平台 ID，也就是第一个冒号之前那段。"""
+
+    return umo.split(":", 1)[0]
+
+
+def unroutable_groups(
+    groups: Iterable[str], umos: dict[str, str], platform_ids: list[str]
+) -> list[tuple[str, str]]:
+    """挑出注定发不出去的群，返回 ``[(群号, 它用的 UMO), ...]``。
+
+    两种写法都会中招：手工配的 ``group_umos`` 前缀不是已加载的平台，或者没配的
+    群退回默认 UMO 而默认平台恰好不在已加载列表里。表现一模一样——
+    ``send_message`` 返回 False、消息被丢掉、没有任何异常。运行时的告警要等到
+    真有播报才会出现，所以启动时就得单独说一次。
+    """
+
+    if not platform_ids:
+        return []  # 平台列表拿不到时不下结论，免得误报
+    known = set(platform_ids)
+    problems: list[tuple[str, str]] = []
+    for group_id in sorted(groups):
+        umo = umos.get(group_id) or default_umo(group_id)
+        if umo_platform(umo) not in known:
+            problems.append((group_id, umo))
+    return problems
 
 
 # 端口写到斜杠后面：ws://1.2.3.4/:9961/ws/bot

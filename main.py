@@ -32,6 +32,7 @@ from .logic import (
     parse_vote_choice,
     pseudonymous_voter_id,
     suspicious_group_ids,
+    unroutable_groups,
 )
 
 try:  # AstrBot 运行时提供；纯函数测试不需要安装 AstrBot。
@@ -77,7 +78,7 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return "".join(self._parts)
 
 
-CLIENT_VERSION = "0.2.5"
+CLIENT_VERSION = "0.2.6"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -119,6 +120,7 @@ class ThChaosPlugin(Star):
         """
 
         self._report_group_config()
+        self._report_unroutable_groups()
         problem = backend_url_problem(self._backend_url)
         if problem:
             astr_logger.warning(f"THChaos backend_url 写错了（{problem}）：{self._backend_url}")
@@ -146,6 +148,28 @@ class ThChaosPlugin(Star):
                 f"THChaos group_ids 里有不像 QQ 群号的条目：{', '.join(odd)}。"
                 "群号是纯数字，若填成了 UMO 或群名将永远不会匹配。"
             )
+
+    def _report_unroutable_groups(self) -> None:
+        """启动时就把「播报注定发不出去」的配置挑出来。
+
+        运行时的告警只在真有播报的那一刻出现；没有投票时这种配置错误是完全
+        静音的——插件连得上后端、白名单也对，等到开播才发现一条都发不出去。
+        """
+
+        platform_ids = self._loaded_platform_ids()
+        problems = unroutable_groups(self._groups, self._umos, platform_ids)
+        if not problems:
+            return
+        groups = "、".join(group_id for group_id, _ in problems)
+        example = "，".join(
+            f'"{group_id}": "<平台ID>:GroupMessage:{group_id}"' for group_id, _ in problems
+        )
+        astr_logger.warning(
+            f"THChaos 群 {groups} 的播报发不出去：它们用的会话不属于任何已加载的平台"
+            f"（当前已加载的平台 ID 有：{', '.join(platform_ids)}）。"
+            f"把该群真实的 UMO 填进 group_umos 即可，例如 {{{example}}}；"
+            "或者直接在群里发一条消息——插件收到白名单群消息后会记住它真实的 UMO。"
+        )
 
     async def terminate(self) -> None:
         if self._snapshot_task:
@@ -326,8 +350,8 @@ class ThChaosPlugin(Star):
                 "只要白名单群里有人说过话，插件之后也会自己记住。"
             )
 
-    def _platform_id_hint(self) -> str:
-        """把当前已加载的平台 ID 列出来。
+    def _loaded_platform_ids(self) -> list[str]:
+        """列出当前已加载的平台 ID。
 
         UMO 的前缀就是平台 ID，而它是用户在面板里自己起的名字；猜错的表现是
         消息被静默丢弃。既然插件能看见实际加载了哪些平台，就别让人再去翻配置。
@@ -339,6 +363,10 @@ class ThChaosPlugin(Star):
                 platform_id = platform.meta().id
                 if platform_id and platform_id not in ids:
                     ids.append(platform_id)
+        return ids
+
+    def _platform_id_hint(self) -> str:
+        ids = self._loaded_platform_ids()
         if not ids:
             return "当前没有已加载的平台适配器。"
         return f"当前已加载的平台 ID 有：{', '.join(ids)}。"
