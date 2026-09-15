@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 本地连接信息与凭据：绝对不要提交真实 Token、QQ 号或服务器地址
+.env
+*.local.*
+local/

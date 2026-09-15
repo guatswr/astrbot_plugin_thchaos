@@ -1,0 +1,55 @@
+{
+  "backend_url": {
+    "type": "string",
+    "description": "后端 Bot WebSocket 地址",
+    "hint": "例如 ws://<服务器IP>:9961/ws/bot（裸 IP + 明文）或 wss://vote.example.com/ws/bot（接了域名和 TLS 时）",
+    "default": "ws://127.0.0.1:8765/ws/bot"
+  },
+  "token": {
+    "type": "string",
+    "description": "后端 Bot Token",
+    "hint": "填后端 .env 里 THCHAOS_BOT_TOKENS 的键，必须与 room_id 匹配。不要填游戏端的 Token",
+    "default": "",
+    "secret": true
+  },
+  "room_id": {
+    "type": "string",
+    "description": "后端房间 ID",
+    "hint": "必须等于 Bot Token 在后端映射到的房间，否则握手会被判 origin_mismatch 并断开",
+    "default": "main"
+  },
+  "group_ids": {
+    "type": "list",
+    "items": {"type": "string"},
+    "description": "参与投票的 QQ 群号白名单",
+    "hint": "只有这里列出的群，群友发的 1/2/3 才会被转发给游戏端；其他群的消息一律忽略。填纯数字群号，例如 123456789，不要填群名，也不要填 aiocqhttp:GroupMessage:123456 这种 UMO。留空则插件不响应任何群（启动时日志会提示）。不确定群号时，先在群里发一条消息，日志里会打印该群号。",
+    "obvious_hint": true,
+    "default": []
+  },
+  "group_umos": {
+    "type": "dict",
+    "items": {},
+    "description": "可选：群号到 AstrBot unified_msg_origin 的映射",
+    "hint": "一般不用填。插件收到群消息后会自动记住该群真实的 UMO；只有播报发不出去时才需要在这里手工指定",
+    "default": {}
+  },
+  "voter_hmac_secret": {
+    "type": "string",
+    "description": "生成不可逆 voter_id 的密钥",
+    "hint": "随便一串随机值；换掉它等于让所有群友变成新的投票人（同一轮里可以再投一次）。不要外泄",
+    "default": "",
+    "secret": true
+  },
+  "snapshot_interval_seconds": {
+    "type": "float",
+    "description": "群内票况合并播报间隔（秒）",
+    "hint": "内部转发仍是实时的，这里只是群消息的节流，避免刷屏",
+    "default": 2
+  },
+  "announce_vote_ack": {
+    "type": "boolean",
+    "description": "是否在群里回复每一条已计票/被拒的投票",
+    "hint": "大群建议关闭，否则每条投票都会产生一条群消息",
+    "default": false
+  }
+}
