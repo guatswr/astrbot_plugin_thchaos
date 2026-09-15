@@ -67,10 +67,10 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
         return lambda cls: cls
 
 
-CLIENT_VERSION = "0.2.0"
+CLIENT_VERSION = "0.2.1"
 
 
-@register("thchaos", "THChaos", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
+@register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
 class ThChaosPlugin(Star):
     def __init__(self, context: Context, config: Any = None):
         super().__init__(context)

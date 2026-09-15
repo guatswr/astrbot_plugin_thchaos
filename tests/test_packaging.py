@@ -29,6 +29,40 @@ def test_conf_schema_is_valid_json():
         assert "default" in spec, f"{key} 缺少 default"
 
 
+# AstrBot 的 astrbot/core/config/default.py 里 DEFAULT_VALUE_MAP 的键。
+# 少了任何一个都会在插件加载时抛 TypeError，整个插件起不来：
+#   TypeError: 不受支持的配置类型 boolean。支持的类型有：dict_keys([...])
+# 写 "boolean" 而不是 "bool" 是最容易犯的错——JSON Schema 本来就叫 boolean，
+# 但 AstrBot 只认 bool。
+ASTRBOT_SCHEMA_TYPES = {
+    "int",
+    "float",
+    "bool",
+    "string",
+    "text",
+    "list",
+    "file",
+    "object",
+    "template_list",
+    "dict",
+}
+
+
+def test_conf_schema_types_are_supported_by_astrbot():
+    """每个配置项的 type 都必须是 AstrBot 认识的那几种。
+
+    AstrBot 的 _parse_schema 只校验顶层 type（"object" 的 items 才会递归），
+    所以这里也只对顶层做断言，不需要递归进 items。
+    """
+    schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+    bad = {
+        key: spec["type"]
+        for key, spec in schema.items()
+        if spec.get("type") not in ASTRBOT_SCHEMA_TYPES
+    }
+    assert not bad, f"这些配置项用了 AstrBot 不认识的类型，会导致插件加载失败：{bad}"
+
+
 def test_every_config_key_read_by_code_exists_in_the_schema():
     """两边必须一一对应。
 

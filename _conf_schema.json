@@ -47,7 +47,7 @@
     "default": 2
   },
   "announce_vote_ack": {
-    "type": "boolean",
+    "type": "bool",
     "description": "是否在群里回复每一条已计票/被拒的投票",
     "hint": "大群建议关闭，否则每条投票都会产生一条群消息",
     "default": false
