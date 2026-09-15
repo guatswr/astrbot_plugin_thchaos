@@ -8,6 +8,7 @@ main.py 依赖 astrbot 包，离线时它自带 shim；装了 AstrBot 的环境�
 from __future__ import annotations
 
 import asyncio
+import logging
 import pathlib
 import sys
 import types
@@ -53,6 +54,13 @@ class FakeContext:
 
     async def send_message(self, umo, chain):
         self.sent.append((umo, str(chain)))
+
+
+class UnroutableContext(FakeContext):
+    """复刻 Context.send_message 找不到平台时的行为：返回 False，不抛异常。"""
+
+    async def send_message(self, umo, chain):
+        return False
 
 
 def make_plugin(groups, *, active_round=7, game_instance="g-1"):
@@ -142,3 +150,28 @@ def test_whitelisted_group_learns_its_umo():
     plugin, _ = make_plugin(["111"])
     run(plugin.on_message(FakeEvent("111", "hello")))
     assert plugin._umos["111"] == "aiocqhttp:GroupMessage:111"
+
+
+def test_announcement_reaches_a_routable_session():
+    context = FakeContext()
+    plugin = ThChaosPlugin(context, {"group_ids": ["111"]})
+    run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert context.sent == [("aiocqhttp:GroupMessage:111", "【观众投票 #1】")]
+
+
+def test_unroutable_session_is_reported_instead_of_dropped_silently(caplog):
+    # 平台 ID 对不上时 AstrBot 只返回 False，消息被丢掉且不报错。插件必须自己
+    # 说出来，否则「已连接后端但群里没反应」是一个完全没有日志的故障。
+    plugin = ThChaosPlugin(UnroutableContext(), {"group_ids": ["111"]})
+    with caplog.at_level(logging.WARNING):
+        run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert "111" in caplog.text
+    assert "aiocqhttp:GroupMessage:111" in caplog.text
+    assert "group_umos" in caplog.text
+
+
+def test_routable_session_logs_no_failure(caplog):
+    plugin = ThChaosPlugin(FakeContext(), {"group_ids": ["111"]})
+    with caplog.at_level(logging.WARNING):
+        run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert "发送消息失败" not in caplog.text

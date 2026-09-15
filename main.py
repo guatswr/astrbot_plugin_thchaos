@@ -61,13 +61,25 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return lambda fn: fn
 
     filter = _Filter()
-    MessageChain = Any  # type: ignore[misc,assignment]
 
     def register(*_args: Any, **_kwargs: Any):
         return lambda cls: cls
 
+    class MessageChain:  # type: ignore[no-redef]
+        """离线测试用的最小替身，只保留插件真正用到的 ``.message()``。"""
 
-CLIENT_VERSION = "0.2.1"
+        def __init__(self) -> None:
+            self._parts: list[str] = []
+
+        def message(self, text: str) -> "MessageChain":
+            self._parts.append(str(text))
+            return self
+
+        def __str__(self) -> str:
+            return "".join(self._parts)
+
+
+CLIENT_VERSION = "0.2.2"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -214,6 +226,12 @@ class ThChaosPlugin(Star):
         payload = envelope.get("payload") or {}
         if message_type == "authenticated":
             self._game_instance_id = payload.get("game_instance_id") or self._game_instance_id
+            # 连上后端本身是要专门说一声的：插件以前只在失败时打日志，
+            # 「究竟连上没有」只能靠后端那边翻 /ws/bot 的记录。
+            astr_logger.info(
+                f"THChaos 已连接后端 {self._backend_url}（房间 {self._room_id}，"
+                f"游戏端{'在线' if self._game_instance_id else '离线'}）"
+            )
         elif message_type == "game.sync":
             self._game_instance_id = envelope.get("game_instance_id") or self._game_instance_id
             active = payload.get("active_vote")
@@ -280,9 +298,21 @@ class ThChaosPlugin(Star):
     async def _announce_group(self, group_id: str, text: str) -> None:
         umo = self._umos.get(group_id) or default_umo(group_id)
         try:
-            await self.context.send_message(umo, MessageChain().message(text))
+            sent = await self.context.send_message(umo, MessageChain().message(text))
         except Exception as exc:
             astr_logger.warning(f"THChaos 向群 {group_id} 发送消息失败：{exc}")
+            return
+        # Context.send_message 找不到匹配的平台时**不抛异常**，只返回 False，
+        # 消息被直接丢弃。不检查返回值的话，「后端连上了、群里却一片安静」
+        # 就没有任何线索——排查时会一路怀疑到网络上去。
+        if sent is False:
+            astr_logger.warning(
+                f"THChaos 向群 {group_id} 发送消息失败：没有平台匹配会话 {umo}。"
+                "默认 UMO 是 aiocqhttp:GroupMessage:<群号>，若你给 OneBot 平台起的 ID 不是 "
+                "aiocqhttp（面板里改过），请在 group_umos 里填该群真实的 UMO，"
+                "例如 {\""
+                f"{group_id}\": \"<平台ID>:GroupMessage:{group_id}\"}}。"
+            )
 
     # --- 群 → 后端 ----------------------------------------------------------
 
