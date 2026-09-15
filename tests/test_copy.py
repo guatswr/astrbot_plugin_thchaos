@@ -140,11 +140,11 @@ def test_vote_opened_lists_options_and_counts_down_in_whole_seconds():
         }
     )
     assert text == (
-        "【异变投票#3】亚托利的高性能播报\n"
+        "【异变投票#3】\n"
         "1、禁止射击\n"
         "2、强制低速\n"
         "3、左右反转\n"
-        "回复1/2/3，给自机挑个异变，剩10秒"
+        "发送1/2/3投票，每人一票｜剩10秒"
     )
 
 
@@ -195,7 +195,7 @@ def test_vote_closed_names_the_winner_and_the_totals():
             "total_votes": 9,
         }
     )
-    assert text == "【异变落定#7】2号中选，得4票，总票9"
+    assert text == "【投票结果#7】中选：2号（4票／共9票）"
 
 
 def test_a_tie_says_each_winner_got_that_many():
@@ -208,7 +208,7 @@ def test_a_tie_says_each_winner_got_that_many():
             "total_votes": 6,
         }
     )
-    assert text == "【异变落定#7】三票打平，三个一起上\n1号、2号、3号中选，各得2票，总票6"
+    assert text == "【投票结果#7】平票，共同中选：1号、2号、3号（各2票／共6票）"
 
 
 def test_no_votes_random_is_not_phrased_as_a_win():
@@ -221,8 +221,9 @@ def test_no_votes_random_is_not_phrased_as_a_win():
             "total_votes": 0,
         }
     )
-    assert "随机抽一个" in text
-    assert "1号中选，得0票，总票0" in text
+    assert "无人投票，随机选中" in text
+    assert text.endswith("1号")
+    assert "0票" not in text
 
 
 def test_cancelled_round_never_claims_a_winner():
@@ -236,7 +237,7 @@ def test_cancelled_round_never_claims_a_winner():
             "total_votes": 5,
         }
     )
-    assert text == "【异变落定#7】这一轮作废，不产生异变"
+    assert text == "【投票结果#7】本轮取消，不产生异变"
     assert "中选" not in text
 
 
@@ -340,7 +341,7 @@ def test_vote_ack_never_shows_a_raw_reason():
 
 
 def test_offline_and_cast_error_are_plain_chinese():
-    assert format_game_offline() == "【游戏离线】自机掉线了，等它回来再投"
+    assert format_game_offline() == "【投票中断】游戏连接已断开，请等待下一轮投票"
     assert format_cast_error({"message": "round 已关闭"}) == "【投票没送出】round 已关闭"
     assert format_cast_error({}) == "【投票没送出】后端没说原因"
 

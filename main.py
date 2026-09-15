@@ -100,8 +100,13 @@ class ThChaosPlugin(Star):
         self._groups = normalize_group_ids(self._config.get("group_ids", []))
         self._umos = {str(k): str(v) for k, v in (self._config.get("group_umos", {}) or {}).items()}
         self._hmac_secret = str(self._config.get("voter_hmac_secret", ""))
-        self._snapshot_interval = max(0.5, min(float(self._config.get("snapshot_interval_seconds", 2)), 30.0))
+        self._snapshot_interval = max(0.5, min(float(self._config.get("snapshot_interval_seconds", 10)), 30.0))
         self._announce_ack = bool(self._config.get("announce_vote_ack", False))
+        self._announce_snapshots = bool(self._config.get("announce_vote_snapshot", False))
+        self._announce_states = bool(self._config.get("announce_game_state", False))
+        self._announce_effects = bool(self._config.get("announce_effect_success", False))
+        self._last_opened: tuple[Any, Any] | None = None
+        self._last_snapshot_text: str | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._network_task: asyncio.Task[None] | None = None
@@ -217,6 +222,7 @@ class ThChaosPlugin(Star):
                     astr_logger.warning(f"THChaos backend 连接失败：{exc}")
                 finally:
                     self._ws = None
+                    self._cancel_snapshot()
                     self._game_instance_id = None
                     self._active_round = None
                     self._active_options = []
@@ -281,22 +287,26 @@ class ThChaosPlugin(Star):
                 f"游戏端{'在线' if self._game_instance_id else '离线'}）"
             )
         elif message_type == "game.sync":
+            self._cancel_snapshot()
             self._game_instance_id = envelope.get("game_instance_id") or self._game_instance_id
             active = payload.get("active_vote")
             self._active_round = active.get("round_id") if active else None
             self._active_options = active.get("options", []) if active else []
             self._latest_snapshot = payload.get("latest_snapshot")
             if active:
-                await self._announce_all(format_vote_opened(active))
+                await self._announce_opened(active)
                 if self._latest_snapshot:
                     self._schedule_snapshot_announcement()
         elif message_type == "vote.opened":
+            self._cancel_snapshot()
             self._game_instance_id = envelope.get("game_instance_id") or self._game_instance_id
             self._active_round = payload.get("round_id")
             self._active_options = payload.get("options", [])
             self._latest_snapshot = None
-            await self._announce_all(format_vote_opened(payload))
+            await self._announce_opened(payload)
         elif message_type == "vote.snapshot":
+            if payload.get("round_id") != self._active_round or self._active_round is None:
+                return
             self._latest_snapshot = payload
             self._schedule_snapshot_announcement()
         elif message_type == "vote.ack":
@@ -304,18 +314,27 @@ class ThChaosPlugin(Star):
             if self._announce_ack and group_id:
                 await self._announce_group(group_id, format_vote_ack(payload))
         elif message_type == "vote.closed":
+            self._cancel_snapshot()
+            text = format_vote_closed(payload, self._active_options)
             self._active_round = None
             self._active_options = []
             self._latest_snapshot = None
-            await self._announce_all(format_vote_closed(payload))
+            await self._announce_all(text)
         elif message_type == "effect.resolved":
-            await self._announce_all(format_effect(payload, (self._effect_names,)))
+            if self._announce_effects or payload.get("status") != "applied":
+                await self._announce_all(format_effect(payload, (self._effect_names,)))
         elif message_type == "game.state_changed":
-            await self._announce_all(format_game_state(payload))
+            if self._announce_states:
+                await self._announce_all(format_game_state(payload))
         elif message_type == "game.offline":
+            was_voting = self._active_round is not None
+            self._cancel_snapshot()
+            self._game_instance_id = None
             self._active_round = None
             self._active_options = []
-            await self._announce_all(format_game_offline())
+            self._latest_snapshot = None
+            if was_voting or self._announce_states:
+                await self._announce_all(format_game_offline())
         elif message_type == "heartbeat.ping":
             await self._send("heartbeat.pong", {"nonce": payload.get("nonce", "heartbeat")})
         elif message_type == "error":
@@ -325,7 +344,22 @@ class ThChaosPlugin(Star):
                 if self._announce_ack and group_id:
                     await self._announce_group(group_id, format_cast_error(payload))
 
+    async def _announce_opened(self, payload: dict[str, Any]) -> None:
+        key = (self._game_instance_id, payload.get("round_id"))
+        if key != self._last_opened:
+            self._last_opened = key
+            self._last_snapshot_text = None
+            await self._announce_all(format_vote_opened(payload))
+
+    def _cancel_snapshot(self) -> None:
+        if self._snapshot_task:
+            self._snapshot_task.cancel()
+            self._snapshot_task = None
+        self._last_snapshot_text = None
+
     def _schedule_snapshot_announcement(self) -> None:
+        if not self._announce_snapshots:
+            return
         if self._snapshot_task and not self._snapshot_task.done():
             return
         self._snapshot_task = asyncio.create_task(self._flush_snapshot(), name="thchaos-snapshot-announcement")
@@ -333,7 +367,10 @@ class ThChaosPlugin(Star):
     async def _flush_snapshot(self) -> None:
         await asyncio.sleep(self._snapshot_interval)
         if self._latest_snapshot:
-            await self._announce_all(format_snapshot(self._latest_snapshot))
+            text = format_snapshot(self._latest_snapshot)
+            if text != self._last_snapshot_text:
+                self._last_snapshot_text = text
+                await self._announce_all(text)
 
     async def _announce_all(self, text: str) -> None:
         for group_id in sorted(self._groups):

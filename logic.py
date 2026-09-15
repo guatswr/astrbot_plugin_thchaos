@@ -250,15 +250,15 @@ EFFECT_RESULT_TEXT = {
 PHASE_TEXT = {
     "offline": "游戏离线",
     "title": "标题画面中~",
-    "waiting": "少女祈祷中~",
+    "waiting": "等待中",
     "voting": "投票中",
     "replay": "重放中",
 }
 STATE_REASON_TEXT = {
     "stage_entered": "让我们期待机师的精彩表现",
-    "stage_left": "感谢机师的精彩表现~",
-    "paused": "少女祈祷中~",
-    "resumed": "游戏继续",
+    "stage_left": "出关卡了",
+    "paused": "暂停了",
+    "resumed": "继续了",
     "offline": "ATRI和游戏离线了~",
     "sync": "重新同步",
 }
@@ -281,7 +281,7 @@ VOTE_ACK_TEXT = {
     "wrong_round": "投的不是这一轮",
     "bad_choice": "只能投1、2、3",
     "bad_voter": "身份没法识别",
-    "duplicate": "baka，这一轮你已经投过了",
+    "duplicate": "这一轮你已经投过了",
     "full": "票满了",
 }
 
@@ -352,7 +352,7 @@ def format_vote_opened(payload: dict[str, Any]) -> str:
     lines = [f"【异变投票#{payload['round_id']}】"]
     for item in payload["options"]:
         lines.append(f"{item['choice']}、{item['name']}")
-    lines.append(f"回复1/2/3，给机师挑个异变吧~，剩{_ceil_seconds(payload.get('remaining_ms', 0))}秒")
+    lines.append(f"发送1/2/3投票，每人一票｜剩{_ceil_seconds(payload.get('remaining_ms', 0))}秒")
     return "\n".join(lines)
 
 
@@ -362,17 +362,21 @@ def format_snapshot(payload: dict[str, Any]) -> str:
     return f"【票况#{payload['round_id']}】{parts}{suffix}"
 
 
-def format_vote_closed(payload: dict[str, Any]) -> str:
-    head = f"【异变落定#{payload['round_id']}】"
+def format_vote_closed(payload: dict[str, Any], options: Iterable[dict[str, Any]] = ()) -> str:
+    head = f"【投票结果#{payload['round_id']}】"
     if payload["reason"] == "cancelled":
-        return head + "这一轮作废了哦~，不产生异变"
-    winners = "、".join(f"{item}号" for item in payload["winner_choices"])
-    # 三个一起中选时说"各得N票"才是对的，"得N票"会被读成总共 N 票。
-    votes = f"得{payload['winning_votes']}票" if len(payload["winner_choices"]) == 1 else f"各得{payload['winning_votes']}票"
-    outcome = f"{winners}中选，{votes}，总票{payload['total_votes']}"
-    # 平票和随机抽签不解释就看不懂；得票最高是常态，解释反而是废话。
-    reason = VOTE_CLOSE_TEXT.get(payload["reason"])
-    return f"{head}{reason}\n{outcome}" if reason else f"{head}{outcome}"
+        return head + "本轮取消，不产生异变"
+    names = {item["choice"]: item.get("name", "") for item in options}
+    names.update({item["choice"]: item.get("name", "") for item in payload.get("final_options", [])})
+    winners = "、".join(
+        f"{choice}号" + (f"·{names[choice]}" if names.get(choice) else "")
+        for choice in payload["winner_choices"]
+    )
+    if payload["reason"] == "no_votes_random":
+        return f"{head}无人投票，随机选中：{winners}"
+    votes = f"{payload['winning_votes']}票" if len(payload["winner_choices"]) == 1 else f"各{payload['winning_votes']}票"
+    prefix = "平票，共同中选：" if payload["reason"] == "tie_all" else "中选："
+    return f"{head}{prefix}{winners}（{votes}／共{payload['total_votes']}票）"
 
 
 def format_effect(payload: dict[str, Any], catalogues: Iterable[dict[str, str]] = ()) -> str:
@@ -390,7 +394,7 @@ def format_game_state(payload: dict[str, Any]) -> str:
 
 
 def format_game_offline() -> str:
-    return "本次STG接力已结束，感谢大家的参与~"
+    return "【投票中断】游戏连接已断开，请等待下一轮投票"
 
 
 def format_vote_ack(payload: dict[str, Any]) -> str:

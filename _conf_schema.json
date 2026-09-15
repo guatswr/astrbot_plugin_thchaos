@@ -20,7 +20,9 @@
   },
   "group_ids": {
     "type": "list",
-    "items": {"type": "string"},
+    "items": {
+      "type": "string"
+    },
     "description": "参与投票的 QQ 群号白名单",
     "hint": "只有这里列出的群，群友发的 1/2/3 才会被转发给游戏端；其他群的消息一律忽略。填纯数字群号，例如 123456789，不要填群名，也不要填 aiocqhttp:GroupMessage:123456 这种 UMO。留空则插件不响应任何群（启动时日志会提示）。不确定群号时，先在群里发一条消息，日志里会打印该群号。",
     "obvious_hint": true,
@@ -43,13 +45,31 @@
   "snapshot_interval_seconds": {
     "type": "float",
     "description": "群内票况合并播报间隔（秒）",
-    "hint": "内部转发仍是实时的，这里只是群消息的节流，避免刷屏",
-    "default": 2
+    "hint": "仅开启中途票况时生效，建议至少10秒；投票转发仍为实时。",
+    "default": 10
   },
   "announce_vote_ack": {
     "type": "bool",
     "description": "是否在群里回复每一条已计票/被拒的投票",
     "hint": "大群建议关闭，否则每条投票都会产生一条群消息",
+    "default": false
+  },
+  "announce_vote_snapshot": {
+    "type": "bool",
+    "description": "播报中途票况",
+    "hint": "默认关闭，每轮只播报开始和结果。开启后按票况间隔合并，票数未变化不重复发送。",
+    "default": false
+  },
+  "announce_game_state": {
+    "type": "bool",
+    "description": "播报游戏状态",
+    "hint": "默认关闭，避免暂停、继续和切换关卡刷屏。投票期间游戏掉线仍会提醒。",
+    "default": false
+  },
+  "announce_effect_success": {
+    "type": "bool",
+    "description": "播报异变成功生效",
+    "hint": "默认关闭，结果消息已包含中选异变名称；执行失败始终提醒。",
     "default": false
   }
 }
