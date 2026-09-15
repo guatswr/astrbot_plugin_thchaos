@@ -22,7 +22,7 @@ import aiohttp
 
 from .logic import (
     backend_url_problem,
-    default_umo,
+    candidate_platform_ids,
     format_effect,
     format_snapshot,
     format_vote_closed,
@@ -31,6 +31,7 @@ from .logic import (
     normalize_group_ids,
     parse_vote_choice,
     pseudonymous_voter_id,
+    resolve_umo,
     suspicious_group_ids,
     unroutable_groups,
 )
@@ -78,7 +79,7 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return "".join(self._parts)
 
 
-CLIENT_VERSION = "0.2.6"
+CLIENT_VERSION = "0.2.7"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -157,7 +158,9 @@ class ThChaosPlugin(Star):
         """
 
         platform_ids = self._loaded_platform_ids()
-        problems = unroutable_groups(self._groups, self._umos, platform_ids)
+        problems = unroutable_groups(
+            self._groups, self._umos, platform_ids, self._group_platform_ids()
+        )
         if not problems:
             return
         groups = "、".join(group_id for group_id, _ in problems)
@@ -331,7 +334,7 @@ class ThChaosPlugin(Star):
             await self._announce_group(group_id, text)
 
     async def _announce_group(self, group_id: str, text: str) -> None:
-        umo = self._umos.get(group_id) or default_umo(group_id)
+        umo = self._umo_for(group_id)
         try:
             sent = await self.context.send_message(umo, MessageChain().message(text))
         except Exception as exc:
@@ -344,26 +347,62 @@ class ThChaosPlugin(Star):
             astr_logger.warning(
                 f"THChaos 向群 {group_id} 发送消息失败：没有平台匹配会话 {umo}。"
                 f"{self._platform_id_hint()}"
-                "默认 UMO 是 aiocqhttp:GroupMessage:<群号>，若你的平台 ID 不是 aiocqhttp，"
-                "请在 group_umos 里填一次该群真实的 UMO，例如 "
-                f'{{"{group_id}": "<上面的平台ID>:GroupMessage:{group_id}"}}；'
-                "只要白名单群里有人说过话，插件之后也会自己记住。"
+                "插件挑会话的顺序是：记住群里来过的真实会话 → 在已加载的平台里"
+                "认出唯一的群聊平台 → 退回默认的 aiocqhttp:GroupMessage:<群号>。"
+                "走到最后一步说明前两步都没成，通常是因为同时装着多个群聊平台、"
+                "无从判断。两种修法都立刻见效：群里随便发一条消息（插件会记住"
+                "那个群真实的会话），或者在 group_umos 里写死，例如 "
+                f'{{"{group_id}": "<上面的平台ID>:GroupMessage:{group_id}"}}。'
             )
 
-    def _loaded_platform_ids(self) -> list[str]:
-        """列出当前已加载的平台 ID。
+    def _umo_for(self, group_id: str) -> str:
+        """给这个群挑一个会话标识（详见 ``logic.resolve_umo`` 的说明）。"""
 
-        UMO 的前缀就是平台 ID，而它是用户在面板里自己起的名字；猜错的表现是
-        消息被静默丢弃。既然插件能看见实际加载了哪些平台，就别让人再去翻配置。
+        umo, _ = resolve_umo(group_id, self._umos, self._group_platform_ids())
+        return umo
+
+    def _loaded_platforms(self) -> list[tuple[str, str]]:
+        """列出当前已加载的平台，每项是 ``(平台ID, 适配器类型)``。
+
+        这两个字段不是一回事，混用就会掉进"平台 ID 猜错、消息被静默丢弃"的坑：
+        ``meta().id`` 是**用户在面板里给这个平台起的名字**（默认 ``aiocqhttp``，
+        改过就变成 ``atri`` 这类），``meta().name`` 是**适配器类型**，写死在
+        AstrBot 代码里（``aiocqhttp``、``webchat``、``telegram``…）。
+        用户改名字改不动类型，所以"这个平台会不会有群"只能看类型。
+
+        AstrBot 核心自己也这么判断：``core/star/context.py`` 里用
+        ``platform.meta().name != "webchat"`` 区分真实群聊平台和自带的 WebUI。
         """
 
-        ids: list[str] = []
-        with suppress(Exception):
-            for platform in self.context.platform_manager.platform_insts:
-                platform_id = platform.meta().id
-                if platform_id and platform_id not in ids:
-                    ids.append(platform_id)
-        return ids
+        # get_insts() 是公开方法（第三方插件普遍用它）；platform_insts 是它背后
+        # 的字段，留着兜底，免得某个版本上没有前者。
+        try:
+            manager = self.context.platform_manager
+        except AttributeError:
+            return []  # 精简 Context（离线测试）里没有 platform_manager
+        get_insts = getattr(manager, "get_insts", None)
+        insts = get_insts() if callable(get_insts) else getattr(manager, "platform_insts", [])
+        found: list[tuple[str, str]] = []
+        for platform in insts:
+            # 这里只兜住"某一个平台读不出 meta"，不兜住外面整段：
+            # 把整个循环包进 suppress 会让真正的编程错误也变成"没有平台"，
+            # 而"没有平台"又安静地退回默认 UMO——正是这个插件一路在修的那种
+            # 无声故障。
+            with suppress(Exception):
+                meta = platform.meta()
+                platform_id = str(getattr(meta, "id", "") or "")
+                adapter = str(getattr(meta, "name", "") or "")
+                if platform_id and (platform_id, adapter) not in found:
+                    found.append((platform_id, adapter))
+        return found
+
+    def _loaded_platform_ids(self) -> list[str]:
+        return [platform_id for platform_id, _ in self._loaded_platforms()]
+
+    def _group_platform_ids(self) -> list[str]:
+        """可能承载群消息的平台 ID——排掉 WebUI 这类不可能是 QQ 群的适配器。"""
+
+        return candidate_platform_ids(self._loaded_platforms())
 
     def _platform_id_hint(self) -> str:
         ids = self._loaded_platform_ids()

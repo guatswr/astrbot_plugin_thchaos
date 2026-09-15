@@ -29,6 +29,11 @@ def pseudonymous_voter_id(secret: str, sender_id: str) -> str:
 # 适配器起的名字，只有没改过时才叫 aiocqhttp——猜错不会报错，只会静默丢消息。
 DEFAULT_UMO_PLATFORM = "aiocqhttp"
 
+# AstrBot 自带的 WebUI 平台：它的"群"是网页里的会话，不可能是 QQ 群。
+# 名字取自 AstrBot 的适配器类型（PlatformMetadata.name），不是实例 ID。
+# AstrBot 核心自己也用 `meta().name != "webchat"` 来判断"这是不是一个真实群聊平台"。
+NON_GROUP_PLATFORM_NAMES = frozenset({"webchat"})
+
 
 def default_umo(group_id: str) -> str:
     return f"{DEFAULT_UMO_PLATFORM}:GroupMessage:{group_id}"
@@ -40,24 +45,65 @@ def umo_platform(umo: str) -> str:
     return umo.split(":", 1)[0]
 
 
-def unroutable_groups(
-    groups: Iterable[str], umos: dict[str, str], platform_ids: list[str]
-) -> list[tuple[str, str]]:
-    """挑出注定发不出去的群，返回 ``[(群号, 它用的 UMO), ...]``。
+def candidate_platform_ids(platforms: Iterable[tuple[str, str]]) -> list[str]:
+    """从 ``[(平台ID, 适配器类型), ...]`` 里挑出可能承载群消息的平台 ID。
 
-    两种写法都会中招：手工配的 ``group_umos`` 前缀不是已加载的平台，或者没配的
-    群退回默认 UMO 而默认平台恰好不在已加载列表里。表现一模一样——
-    ``send_message`` 返回 False、消息被丢掉、没有任何异常。运行时的告警要等到
-    真有播报才会出现，所以启动时就得单独说一次。
+    平台 ID 是用户在面板里给适配器起的名字，适配器类型是 AstrBot 代码里写死的。
+    用户改名字改不动类型，所以能用来判断"这个平台会不会有群"的只有类型。
+    类型认不出来（空串）时不能排除，宁可多留一个让上层去判断歧义。
+    """
+
+    return [
+        platform_id
+        for platform_id, adapter in platforms
+        if platform_id and adapter not in NON_GROUP_PLATFORM_NAMES
+    ]
+
+
+def resolve_umo(
+    group_id: str, known_umos: dict[str, str], group_platform_ids: list[str]
+) -> tuple[str, str]:
+    """决定这个群的播报该发到哪个会话，返回 ``(umo, 来源)``。
+
+    这里不靠猜平台名字，而是一层层往下退：
+
+    1. **群里真来过消息**——``event.unified_msg_origin`` 是既成事实，不可能错。
+    2. **从已加载的平台里认**——适配器类型（``meta().name``）是代码里写死的，
+       用户改平台名字改不动它。把 WebUI 平台排除掉之后若只剩一个，那它就是
+       这个群所在的平台，用它真实的 ID（``meta().id``）拼会话标识。
+    3. **退回默认**——剩下唯一的情况是同时装着多个群聊平台，这时确实无从判断
+       （猜错就是把消息发进另一个不相干的平台），留给 ``group_umos`` 或者让
+       群里有人说句话来解决。
+    """
+
+    known = known_umos.get(group_id)
+    if known:
+        return known, "记住的"
+    if len(group_platform_ids) == 1:
+        return f"{group_platform_ids[0]}:GroupMessage:{group_id}", "自动识别"
+    return default_umo(group_id), "默认"
+
+
+def unroutable_groups(
+    groups: Iterable[str],
+    known_umos: dict[str, str],
+    platform_ids: list[str],
+    group_platform_ids: list[str],
+) -> list[tuple[str, str]]:
+    """挑出注定发不出去的群，返回 ``[(群号, 它会用的 UMO), ...]``。
+
+    ``platform_ids`` 是当前**已加载**的全部平台 ID：拿不到平台列表时不下结论，
+    免得误报。判断走的是与真实发送完全相同的 ``resolve_umo``，所以启动时的结论
+    和运行时的行为不会各说各话。
     """
 
     if not platform_ids:
-        return []  # 平台列表拿不到时不下结论，免得误报
-    known = set(platform_ids)
+        return []
+    loaded = set(platform_ids)
     problems: list[tuple[str, str]] = []
     for group_id in sorted(groups):
-        umo = umos.get(group_id) or default_umo(group_id)
-        if umo_platform(umo) not in known:
+        umo, _ = resolve_umo(group_id, known_umos, group_platform_ids)
+        if umo_platform(umo) not in loaded:
             problems.append((group_id, umo))
     return problems
 

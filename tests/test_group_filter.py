@@ -286,24 +286,48 @@ def test_initialize_warns_about_a_typo_backend_url(caplog):
 
 
 class FakePlatform:
-    def __init__(self, platform_id):
+    """平台实例替身。id 与 adapter 是两个不同的东西：
+
+    id 是用户在面板里给这个平台起的名字（默认 aiocqhttp，改过就是 atri 这类），
+    adapter 是 AstrBot 代码里写死的适配器类型（aiocqhttp / webchat / telegram…）。
+    """
+
+    def __init__(self, platform_id, adapter="aiocqhttp"):
         self._id = platform_id
+        self._adapter = adapter
 
     def meta(self):
-        return types.SimpleNamespace(id=self._id)
+        return types.SimpleNamespace(id=self._id, name=self._adapter)
 
 
 class PlatformAwareContext(FakeContext):
-    """平台的 UMO 前缀对不上时用的替身：能列出已加载的平台。"""
+    """带 platform_manager 的替身，能列出已加载的平台。
 
-    def __init__(self, platform_ids):
+    platforms 里每一项可以是 "atri"（适配器类型按默认的 aiocqhttp 算），
+    或者 ("webchat", "webchat") 这样的 (ID, 适配器类型) 二元组。
+    """
+
+    def __init__(self, platforms, *, routable=False):
         super().__init__()
-        self.platform_manager = types.SimpleNamespace(
-            platform_insts=[FakePlatform(pid) for pid in platform_ids]
-        )
+        self._insts = [
+            FakePlatform(*item) if isinstance(item, tuple) else FakePlatform(item)
+            for item in platforms
+        ]
+        self.platform_manager = types.SimpleNamespace(platform_insts=self._insts)
+        self.routable = routable
+
+    def get_insts(self):
+        return self._insts
 
     async def send_message(self, umo, chain):
-        return False
+        self.sent.append((umo, str(chain)))
+        return True if self.routable else False
+
+
+class LegacyPlatformManagerContext(PlatformAwareContext):
+    """只有 platform_insts 字段、没有 get_insts() 的旧式 platform_manager。"""
+
+    get_insts = None
 
 
 def test_unroutable_session_names_the_available_platforms(caplog):
@@ -317,6 +341,54 @@ def test_unroutable_session_names_the_available_platforms(caplog):
     assert "GroupMessage:111" in caplog.text
 
 
+def test_announcement_finds_the_only_group_platform_with_no_config_at_all():
+    # "非要手动指定 UMO"那个问题的核心用例：平台 ID 是 atri，插件应该自己认出来
+    # 并把消息发对地方，用户什么配置都不用填。
+    context = PlatformAwareContext([("atri", "aiocqhttp"), ("webchat", "webchat")], routable=True)
+    plugin = ThChaosPlugin(context, {"group_ids": ["123456789"]})
+    run(plugin._announce_group("123456789", "【观众投票 #1】"))
+    assert context.sent == [("atri:GroupMessage:123456789", "【观众投票 #1】")]
+
+
+def test_webchat_platform_is_never_picked_as_the_target(caplog):
+    # 只剩 WebUI 平台时不能瞎猜——它的"群"是网页里的会话，发过去等于没发。
+    context = PlatformAwareContext([("webchat", "webchat")])
+    plugin = ThChaosPlugin(context, {"group_ids": ["111"]})
+    with caplog.at_level(logging.WARNING):
+        run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert context.sent[0][0] == "aiocqhttp:GroupMessage:111"
+    assert "发送消息失败" in caplog.text
+
+
+def test_several_group_platforms_are_not_guessed_between(caplog):
+    # 两个群聊平台时无从判断，宁可发到默认值上并告警，也不要静默发错群。
+    context = PlatformAwareContext([("atri", "aiocqhttp"), ("tg", "telegram")])
+    plugin = ThChaosPlugin(context, {"group_ids": ["111"]})
+    with caplog.at_level(logging.WARNING):
+        run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert context.sent[0][0] == "aiocqhttp:GroupMessage:111"
+    assert "发送消息失败" in caplog.text
+
+
+def test_group_umos_still_wins_over_auto_detection():
+    # 多平台用户仍然可以手写；配置里写了就以配置为准。
+    context = PlatformAwareContext([("atri", "aiocqhttp"), ("tg", "telegram")], routable=True)
+    plugin = ThChaosPlugin(
+        context,
+        {"group_ids": ["111"], "group_umos": {"111": "tg:GroupMessage:111"}},
+    )
+    run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert context.sent == [("tg:GroupMessage:111", "【观众投票 #1】")]
+
+
+def test_platform_lookup_falls_back_to_the_platform_insts_attribute():
+    # get_insts() 是公开方法，但旧版或精简实现可能只有 platform_insts 字段。
+    context = LegacyPlatformManagerContext([("atri", "aiocqhttp"), ("webchat", "webchat")])
+    plugin = ThChaosPlugin(context, {"group_ids": ["111"]})
+    assert plugin._loaded_platforms() == [("atri", "aiocqhttp"), ("webchat", "webchat")]
+    assert plugin._group_platform_ids() == ["atri"]
+
+
 def test_platform_hint_survives_a_context_without_platform_manager(caplog):
     # 离线测试与精简上下文里没有 platform_manager，不能因此抛异常。
     plugin = ThChaosPlugin(UnroutableContext(), {"group_ids": ["111"]})
@@ -325,10 +397,17 @@ def test_platform_hint_survives_a_context_without_platform_manager(caplog):
     assert "没有已加载的平台适配器" in caplog.text
 
 
-def test_initialize_names_groups_whose_session_would_be_dropped(caplog):
-    # 这种配置错误在运行时要等到真有播报才露头；没有投票时它完全静音，
-    # 所以启动时就得先说出来。
-    context = PlatformAwareContext(["atri", "webchat"])
+def test_initialize_is_quiet_when_a_single_group_platform_can_be_recognised(caplog):
+    # 0.2.7 起这种情况插件自己认得出来，不该再报警要用户去填 group_umos。
+    context = PlatformAwareContext([("atri", "aiocqhttp"), ("webchat", "webchat")])
+    with caplog.at_level(logging.WARNING):
+        _initialize_with_recorder({"token": "t", "group_ids": ["123456789"]}, context)
+    assert "发不出去" not in caplog.text
+
+
+def test_initialize_names_groups_when_several_group_platforms_are_ambiguous(caplog):
+    # 真正无从判断时（多个群聊平台）才该在启动时说出来。
+    context = PlatformAwareContext([("atri", "aiocqhttp"), ("tg", "telegram")])
     with caplog.at_level(logging.WARNING):
         _initialize_with_recorder({"token": "t", "group_ids": ["123456789"]}, context)
     assert "123456789" in caplog.text
@@ -337,14 +416,14 @@ def test_initialize_names_groups_whose_session_would_be_dropped(caplog):
 
 
 def test_initialize_is_quiet_when_the_default_platform_is_loaded(caplog):
-    context = PlatformAwareContext(["aiocqhttp", "webchat"])
+    context = PlatformAwareContext([("aiocqhttp", "aiocqhttp"), ("webchat", "webchat")])
     with caplog.at_level(logging.WARNING):
         _initialize_with_recorder({"token": "t", "group_ids": ["123456789"]}, context)
     assert "发不出去" not in caplog.text
 
 
 def test_initialize_is_quiet_when_group_umos_matches_a_loaded_platform(caplog):
-    context = PlatformAwareContext(["atri", "webchat"])
+    context = PlatformAwareContext([("atri", "aiocqhttp"), ("tg", "telegram")])
     config = {
         "token": "t",
         "group_ids": ["123456789"],
