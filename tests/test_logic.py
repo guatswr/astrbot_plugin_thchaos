@@ -1,4 +1,5 @@
 from logic import (
+    backend_url_problem,
     default_umo,
     format_snapshot,
     group_id_from_message,
@@ -65,3 +66,25 @@ def test_suspicious_group_ids_flags_umo_and_group_names():
     assert suspicious_group_ids({"aiocqhttp:GroupMessage:123456"}) == ["aiocqhttp:GroupMessage:123456"]
     assert suspicious_group_ids({"东方 THChaos 观众群"}) == ["东方 THChaos 观众群"]
     assert suspicious_group_ids({"123456", "bad:one"}) == ["bad:one"]
+
+
+def test_correct_backend_urls_are_accepted():
+    for url in (
+        "ws://127.0.0.1:8765/ws/bot",
+        "ws://192.0.2.10:9961/ws/bot",
+        "wss://vote.example.com/ws/bot",
+    ):
+        assert backend_url_problem(url) is None, url
+
+
+def test_port_written_after_a_slash_is_caught_with_the_fix():
+    # ws://1.2.3.4/:9961/ws/bot 能被正常解析，端口悄悄退回 80，最后报一句
+    # 没头没脑的 "404 Invalid response status"。
+    problem = backend_url_problem("ws://192.0.2.10/:9961/ws/bot")
+    assert problem is not None
+    assert "ws://192.0.2.10:9961/ws/bot" in problem
+
+
+def test_wrong_scheme_and_missing_host_are_caught():
+    assert backend_url_problem("http://1.2.3.4:9961/ws/bot") is not None
+    assert backend_url_problem("192.0.2.10:9961/ws/bot") is not None

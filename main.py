@@ -21,6 +21,7 @@ from typing import Any
 import aiohttp
 
 from .logic import (
+    backend_url_problem,
     default_umo,
     format_effect,
     format_snapshot,
@@ -76,7 +77,7 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return "".join(self._parts)
 
 
-CLIENT_VERSION = "0.2.3"
+CLIENT_VERSION = "0.2.4"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -118,6 +119,9 @@ class ThChaosPlugin(Star):
         """
 
         self._report_group_config()
+        problem = backend_url_problem(self._backend_url)
+        if problem:
+            astr_logger.warning(f"THChaos backend_url 写错了（{problem}）：{self._backend_url}")
         if not self._hmac_secret:
             astr_logger.warning("THChaos voter_hmac_secret 未配置，拒绝接收 QQ 投票")
         if not self._token:

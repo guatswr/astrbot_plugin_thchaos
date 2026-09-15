@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import re
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 
 def parse_vote_choice(text: str) -> int | None:
@@ -26,6 +27,30 @@ def pseudonymous_voter_id(secret: str, sender_id: str) -> str:
 
 def default_umo(group_id: str) -> str:
     return f"aiocqhttp:GroupMessage:{group_id}"
+
+
+# 端口写到斜杠后面：ws://1.2.3.4/:9961/ws/bot
+_PORT_AFTER_SLASH = re.compile(r"^/(:\d+)(/.*)?$")
+
+
+def backend_url_problem(url: str) -> str | None:
+    """挑出几类明显写错的 backend_url；没问题时返回 None。
+
+    最常见的是把端口写到斜杠后面：``ws://1.2.3.4/:9961/ws/bot``。这条 URL 能
+    被正常解析，端口于是悄悄退回默认的 80，插件去连一个完全无关的服务，最后
+    报一句没头没脑的 ``404 Invalid response status``——离真正的原因隔了很远。
+    """
+
+    parts = urlsplit(url)
+    if parts.scheme not in {"ws", "wss"}:
+        return f"scheme 应该是 ws 或 wss，现在是「{parts.scheme or '空'}」"
+    if not parts.hostname:
+        return "没有主机名"
+    typo = _PORT_AFTER_SLASH.match(parts.path)
+    if typo:
+        fixed = f"{parts.scheme}://{parts.netloc}{typo.group(1)}{typo.group(2) or '/ws/bot'}"
+        return f"端口写到了斜杠后面，应该写成 {fixed}"
+    return None
 
 
 # --- 参与投票的群聊白名单 ---------------------------------------------------

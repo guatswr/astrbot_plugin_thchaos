@@ -97,6 +97,15 @@ THChaos 已连接后端 ws://<服务器IP>:9961/ws/bot（房间 main，游戏端
 
 **插件连不上后端。** 日志里 `backend token 未配置` 说明 `token` 是空的，插件会直接不连接；`连接失败：...` 说明地址不通或握手被拒。地址要填 **`ws://<服务器IP>:9961/ws/bot`**——9961 是宿主机的发布端口，不是容器里的 8765。握手被拒通常是 `token` 与 `room_id` 和后端 `.env` 的 `THCHAOS_BOT_TOKENS` 对不上，日志里会有 `THChaos backend error: ...`。
 
+**`连接失败：404, message='Invalid response status'`。** 基本可以断定 `backend_url` 里的端口写到了斜杠后面：
+
+```
+ws://192.0.2.10/:9961/ws/bot       ← 多了这个斜杠
+ws://192.0.2.10:9961/ws/bot        ← 应该是这样
+```
+
+这条 URL 能被正常解析，端口于是悄悄退回默认的 80，插件去连一个完全无关的服务，报出来的错离真正的原因很远。0.2.4 起插件会在启动时直接点破并给出正确写法（`THChaos backend_url 写错了（端口写到了斜杠后面，应该写成 ...）`）。
+
 **日志报「没有平台匹配会话 aiocqhttp:GroupMessage:...」。** 播报的目标是 `<平台ID>:GroupMessage:<群号>`。AstrBot 在找不到匹配平台时**不抛异常**，只是返回 `False` 把消息丢掉；插件主动检查了这个返回值，所以这个本来无声的故障会变成一条告警。如果你在面板里给 OneBot 平台起的 ID 不是 `aiocqhttp`，在 `group_umos` 里手工填一次该群真实的 UMO 即可：
 
 ```json

@@ -258,3 +258,28 @@ def test_terminate_cancels_the_connection():
         assert task.cancelled()
 
     run(main())
+
+
+def test_initialize_warns_about_a_typo_backend_url(caplog):
+    # 端口写到斜杠后面时，aiohttp 报的是 "404 Invalid response status"，
+    # 和真正的原因隔了十万八千里；插件自己在启动时把它点破。
+    plugin = ThChaosPlugin(
+        FakeContext(),
+        {"token": "t", "backend_url": "ws://192.0.2.10/:9961/ws/bot"},
+    )
+
+    async def fake_run():
+        await asyncio.sleep(3600)
+
+    async def main():
+        plugin._run_network = fake_run  # type: ignore[method-assign]
+        with caplog.at_level(logging.WARNING):
+            await plugin.initialize()
+        task = plugin._network_task
+        assert task is not None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    run(main())
+    assert "ws://192.0.2.10:9961/ws/bot" in caplog.text
