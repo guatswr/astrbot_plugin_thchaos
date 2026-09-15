@@ -1,6 +1,6 @@
 # astrbot_plugin_thchaos
 
-THChaos 的 AstrBot 插件：把游戏端的观众投票播报**到你指定的 QQ 群**，并把群友回复的 `1`/`2`/`3` 转发给游戏端。
+THChaos 的 AstrBot 插件：把游戏端的观众投票播报**到指定的 QQ 群**，并把群友回复的 `1`/`2`/`3` 转发给游戏端。
 
 ```
 THChaos 游戏端 ──▶ thchaos_backend ──▶ 本插件 ──▶ 指定群（group_ids）
@@ -16,7 +16,7 @@ AstrBot 插件按仓库安装到 `data/plugins/`：
 
 ```bash
 cd <AstrBot>/data/plugins
-git clone <本仓库地址> astrbot_plugin_thchaos     # 目录名必须是 astrbot_plugin_thchaos
+git clone https://github.com/guatswr/astrbot_plugin_thchaos.git astrbot_plugin_thchaos
 ```
 
 或者直接把整个目录复制进去。依赖只有 `aiohttp`（AstrBot 自带，`requirements.txt` 里也写了一份）。放好后在 AstrBot 的插件管理里重载一次即可。
@@ -101,4 +101,4 @@ python -m pytest tests -q
 
 ## 来源
 
-本插件原本位于 `thchaos_backend` 仓库的 `integrations/astrbot_plugin_thchaos/`，独立成仓库后单独演进。协议见 [thchaos_backend 的 docs/protocol-v1.md](../thchaos_backend/docs/protocol-v1.md)。
+本插件原本位于 [thchaos_backend](https://github.com/guatswr/thchaos_backend) 仓库的 `integrations/astrbot_plugin_thchaos/`，独立成仓库后单独演进。后端协议见 [docs/protocol-v1.md](https://github.com/guatswr/thchaos_backend/blob/main/docs/protocol-v1.md)。

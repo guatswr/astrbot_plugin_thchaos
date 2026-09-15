@@ -3,3 +3,4 @@ display_name: THChaos 观众投票
 desc: 把 THChaos 游戏端的观众投票同步到指定的 QQ 群，并把群友回复的 1/2/3 转发给游戏端。
 version: 0.2.0
 author: THChaos
+repo: https://github.com/guatswr/astrbot_plugin_thchaos
