@@ -283,3 +283,43 @@ def test_initialize_warns_about_a_typo_backend_url(caplog):
 
     run(main())
     assert "ws://192.0.2.10:9961/ws/bot" in caplog.text
+
+
+class FakePlatform:
+    def __init__(self, platform_id):
+        self._id = platform_id
+
+    def meta(self):
+        return types.SimpleNamespace(id=self._id)
+
+
+class PlatformAwareContext(FakeContext):
+    """平台的 UMO 前缀对不上时用的替身：能列出已加载的平台。"""
+
+    def __init__(self, platform_ids):
+        super().__init__()
+        self.platform_manager = types.SimpleNamespace(
+            platform_insts=[FakePlatform(pid) for pid in platform_ids]
+        )
+
+    async def send_message(self, umo, chain):
+        return False
+
+
+def test_unroutable_session_names_the_available_platforms(caplog):
+    # UMO 前缀是用户在面板里起的平台 ID。插件能看见实际加载了哪些平台，
+    # 就应该直接报出来，而不是让人去翻配置猜。
+    plugin = ThChaosPlugin(PlatformAwareContext(["napcat", "qq_official"]), {"group_ids": ["111"]})
+    with caplog.at_level(logging.WARNING):
+        run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert "napcat" in caplog.text
+    assert "qq_official" in caplog.text
+    assert "GroupMessage:111" in caplog.text
+
+
+def test_platform_hint_survives_a_context_without_platform_manager(caplog):
+    # 离线测试与精简上下文里没有 platform_manager，不能因此抛异常。
+    plugin = ThChaosPlugin(UnroutableContext(), {"group_ids": ["111"]})
+    with caplog.at_level(logging.WARNING):
+        run(plugin._announce_group("111", "【观众投票 #1】"))
+    assert "没有已加载的平台适配器" in caplog.text

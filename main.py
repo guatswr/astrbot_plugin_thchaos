@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover - 仅允许离线语法/纯函数测试�
             return "".join(self._parts)
 
 
-CLIENT_VERSION = "0.2.4"
+CLIENT_VERSION = "0.2.5"
 
 
 @register("thchaos", "Taropoi", "THChaos 游戏观众投票桥接", CLIENT_VERSION)
@@ -319,11 +319,29 @@ class ThChaosPlugin(Star):
         if sent is False:
             astr_logger.warning(
                 f"THChaos 向群 {group_id} 发送消息失败：没有平台匹配会话 {umo}。"
-                "默认 UMO 是 aiocqhttp:GroupMessage:<群号>，若你给 OneBot 平台起的 ID 不是 "
-                "aiocqhttp（面板里改过），请在 group_umos 里填该群真实的 UMO，"
-                "例如 {\""
-                f"{group_id}\": \"<平台ID>:GroupMessage:{group_id}\"}}。"
+                f"{self._platform_id_hint()}"
+                "默认 UMO 是 aiocqhttp:GroupMessage:<群号>，若你的平台 ID 不是 aiocqhttp，"
+                "请在 group_umos 里填一次该群真实的 UMO，例如 "
+                f'{{"{group_id}": "<上面的平台ID>:GroupMessage:{group_id}"}}；'
+                "只要白名单群里有人说过话，插件之后也会自己记住。"
             )
+
+    def _platform_id_hint(self) -> str:
+        """把当前已加载的平台 ID 列出来。
+
+        UMO 的前缀就是平台 ID，而它是用户在面板里自己起的名字；猜错的表现是
+        消息被静默丢弃。既然插件能看见实际加载了哪些平台，就别让人再去翻配置。
+        """
+
+        ids: list[str] = []
+        with suppress(Exception):
+            for platform in self.context.platform_manager.platform_insts:
+                platform_id = platform.meta().id
+                if platform_id and platform_id not in ids:
+                    ids.append(platform_id)
+        if not ids:
+            return "当前没有已加载的平台适配器。"
+        return f"当前已加载的平台 ID 有：{', '.join(ids)}。"
 
     # --- 群 → 后端 ----------------------------------------------------------
 
