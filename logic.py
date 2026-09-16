@@ -352,6 +352,9 @@ def format_vote_opened(payload: dict[str, Any]) -> str:
     lines = [f"【异变投票#{payload['round_id']}】"]
     for item in payload["options"]:
         lines.append(f"{item['choice']}、{item['name']}")
+        description = item.get("description")
+        if isinstance(description, str) and description.strip():
+            lines.append("   " + " ".join(description.split()))
     lines.append(f"发送1/2/3投票，每人一票｜剩{_ceil_seconds(payload.get('remaining_ms', 0))}秒")
     return "\n".join(lines)
 

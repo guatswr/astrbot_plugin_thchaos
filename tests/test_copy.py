@@ -29,6 +29,16 @@ from logic import (
 )
 
 # --- 枚举空间：后端 protocol/payloads.py 里的 StrEnum 全量 -------------------
+def test_opened_with_optional_description():
+    payload = {"round_id": 1, "remaining_ms": 10000, "options": [
+        {"choice": 1, "name": "蓄力爆发", "description": "冻结5秒，再以150%速度运动2秒。"},
+        {"choice": 2, "name": "旧版选项"},
+        {"choice": 3, "name": "空说明", "description": ""},
+    ]}
+    text = format_vote_opened(payload)
+    assert "1、蓄力爆发\n   冻结5秒，再以150%速度运动2秒。" in text
+    assert "2、旧版选项\n3、空说明\n发送" in text
+
 
 BACKEND_PHASES = {"offline", "title", "waiting", "voting", "replay"}
 BACKEND_STATE_REASONS = {"stage_entered", "stage_left", "paused", "resumed", "offline", "sync"}
