@@ -105,7 +105,13 @@ class ThChaosPlugin(Star):
         self._announce_snapshots = bool(self._config.get("announce_vote_snapshot", False))
         self._announce_states = bool(self._config.get("announce_game_state", False))
         self._announce_effects = bool(self._config.get("announce_effect_success", False))
-        self._last_opened: tuple[Any, Any] | None = None
+        self._opening: dict[str, Any] | None = None
+        self._delivery_queues: dict[str, asyncio.Queue] = {}
+        self._delivery_tasks: dict[str, asyncio.Task] = {}
+        self._delivery_timeout = 3.0
+        self._retry_delay = 0.5
+        self._backend_interrupted = False
+        self._stopping = False
         self._last_snapshot_text: str | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -186,6 +192,7 @@ class ThChaosPlugin(Star):
         )
 
     async def terminate(self) -> None:
+        self._stopping = True
         if self._snapshot_task:
             self._snapshot_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -194,6 +201,12 @@ class ThChaosPlugin(Star):
             self._network_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._network_task
+        tasks = list(self._delivery_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._delivery_queues.clear()
         if self._session:
             await self._session.close()
 
@@ -221,22 +234,27 @@ class ThChaosPlugin(Star):
                 except Exception as exc:
                     astr_logger.warning(f"THChaos backend 连接失败：{exc}")
                 finally:
-                    self._ws = None
-                    self._cancel_snapshot()
-                    self._game_instance_id = None
-                    self._active_round = None
-                    self._active_options = []
-                    self._latest_snapshot = None
-                    # Casts that were waiting for an ACK belong to the old
-                    # WebSocket session. Do not retain their group mapping
-                    # forever when a reconnect races with the game response.
-                    self._cast_groups.clear()
+                    await self._backend_disconnected()
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
         finally:
             self._ws = None
             await self._session.close()
             self._session = None
+
+    async def _backend_disconnected(self) -> None:
+        was_voting = self._active_round is not None
+        self._ws = None
+        self._cancel_snapshot()
+        self._opening = None
+        self._game_instance_id = None
+        self._active_round = None
+        self._active_options = []
+        self._latest_snapshot = None
+        self._cast_groups.clear()
+        if was_voting and not self._backend_interrupted and not self._stopping:
+            self._backend_interrupted = True
+            await self._announce_all("【投票中断】投票连接已断开，暂时无法收票，请等待恢复")
 
     async def _send_hello(self) -> None:
         await self._send(
@@ -293,8 +311,15 @@ class ThChaosPlugin(Star):
             self._active_round = active.get("round_id") if active else None
             self._active_options = active.get("options", []) if active else []
             self._latest_snapshot = payload.get("latest_snapshot")
+            recovering = self._backend_interrupted
+            self._backend_interrupted = False
             if active:
                 await self._announce_opened(active)
+            else:
+                self._opening = None
+                if recovering:
+                    await self._announce_all("【连接恢复】当前无投票，请等待下一轮")
+            if active:
                 if self._latest_snapshot:
                     self._schedule_snapshot_announcement()
         elif message_type == "vote.opened":
@@ -312,8 +337,9 @@ class ThChaosPlugin(Star):
         elif message_type == "vote.ack":
             group_id = self._cast_groups.pop(str(payload.get("cast_id", "")), "")
             if self._announce_ack and group_id:
-                await self._announce_group(group_id, format_vote_ack(payload))
+                self._enqueue(group_id, format_vote_ack(payload))
         elif message_type == "vote.closed":
+            self._opening = None
             self._cancel_snapshot()
             text = format_vote_closed(payload, self._active_options)
             self._active_round = None
@@ -327,6 +353,7 @@ class ThChaosPlugin(Star):
             if self._announce_states:
                 await self._announce_all(format_game_state(payload))
         elif message_type == "game.offline":
+            self._opening = None
             was_voting = self._active_round is not None
             self._cancel_snapshot()
             self._game_instance_id = None
@@ -342,14 +369,66 @@ class ThChaosPlugin(Star):
             if payload.get("cast_id"):
                 group_id = self._cast_groups.pop(str(payload["cast_id"]), "")
                 if self._announce_ack and group_id:
-                    await self._announce_group(group_id, format_cast_error(payload))
+                    self._enqueue(group_id, format_cast_error(payload))
 
     async def _announce_opened(self, payload: dict[str, Any]) -> None:
         key = (self._game_instance_id, payload.get("round_id"))
-        if key != self._last_opened:
-            self._last_opened = key
+        if self._opening is None or self._opening["key"] != key:
+            self._opening = {"key": key, "sent": set(), "pending": set()}
             self._last_snapshot_text = None
-            await self._announce_all(format_vote_opened(payload))
+        opening = self._opening
+        opening["payload"] = dict(payload)
+        opening["deadline"] = asyncio.get_running_loop().time() + max(0, float(payload.get("remaining_ms", 0))) / 1000
+        for group_id in sorted(self._groups):
+            if group_id not in opening["sent"] and group_id not in opening["pending"]:
+                if self._enqueue(group_id, "", opening):
+                    opening["pending"].add(group_id)
+
+    def _enqueue(self, group_id: str, text: str, opening: dict[str, Any] | None = None) -> bool:
+        if self._stopping:
+            return False
+        queue = self._delivery_queues.setdefault(group_id, asyncio.Queue(maxsize=100))
+        try:
+            queue.put_nowait((text, opening))
+        except asyncio.QueueFull:
+            astr_logger.warning(f"THChaos 群 {group_id} 的发送队列已满，丢弃本条播报")
+            return False
+        task = self._delivery_tasks.get(group_id)
+        if task is None or task.done():
+            self._delivery_tasks[group_id] = asyncio.create_task(self._deliver_group(group_id), name=f"thchaos-delivery-{group_id}")
+        return True
+
+    async def _deliver_group(self, group_id: str) -> None:
+        queue = self._delivery_queues[group_id]
+        while not queue.empty():
+            text, opening = queue.get_nowait()
+            try:
+                # 普通消息只尝试一次；开票最多三次，每次都检查本轮是否仍有效。
+                for attempt in range(3 if opening is not None else 1):
+                    timeout = self._delivery_timeout
+                    if opening is not None:
+                        remaining = opening["deadline"] - asyncio.get_running_loop().time()
+                        if self._opening is not opening or remaining <= 0:
+                            break
+                        timeout = min(timeout, remaining)
+                        payload = dict(opening["payload"], remaining_ms=max(1, int(remaining * 1000)))
+                        text = format_vote_opened(payload)
+                    try:
+                        sent = await asyncio.wait_for(self._announce_group(group_id, text), timeout)
+                    except asyncio.TimeoutError:
+                        astr_logger.warning(f"THChaos 向群 {group_id} 发送消息超时")
+                        # 超时可能已经送达，不盲目自动重发；后续同步可再次尝试。
+                        break
+                    if sent:
+                        if opening is not None:
+                            opening["sent"].add(group_id)
+                        break
+                    if opening is not None and attempt < 2:
+                        await asyncio.sleep(self._retry_delay)
+            finally:
+                if opening is not None:
+                    opening["pending"].discard(group_id)
+                queue.task_done()
 
     def _cancel_snapshot(self) -> None:
         if self._snapshot_task:
@@ -374,15 +453,15 @@ class ThChaosPlugin(Star):
 
     async def _announce_all(self, text: str) -> None:
         for group_id in sorted(self._groups):
-            await self._announce_group(group_id, text)
+            self._enqueue(group_id, text)
 
-    async def _announce_group(self, group_id: str, text: str) -> None:
+    async def _announce_group(self, group_id: str, text: str) -> bool:
         umo = self._umo_for(group_id)
         try:
             sent = await self.context.send_message(umo, MessageChain().message(text))
         except Exception as exc:
             astr_logger.warning(f"THChaos 向群 {group_id} 发送消息失败：{exc}")
-            return
+            return False
         # Context.send_message 找不到匹配的平台时**不抛异常**，只返回 False，
         # 消息被直接丢弃。不检查返回值的话，「后端连上了、群里却一片安静」
         # 就没有任何线索——排查时会一路怀疑到网络上去。
@@ -397,6 +476,8 @@ class ThChaosPlugin(Star):
                 "那个群真实的会话），或者在 group_umos 里写死，例如 "
                 f'{{"{group_id}": "<上面的平台ID>:GroupMessage:{group_id}"}}。'
             )
+
+        return sent is not False
 
     def _umo_for(self, group_id: str) -> str:
         """给这个群挑一个会话标识（详见 ``logic.resolve_umo`` 的说明）。"""
